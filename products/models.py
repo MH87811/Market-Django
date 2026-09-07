@@ -1,17 +1,20 @@
-from django.db import models
+from django.db import models, transaction
 from django.contrib.auth import get_user_model
 from django.urls import reverse
-from django.utils.text import slugify
+from .utils import set_slug
 
 # Create your models here.
 
 User = get_user_model()
+
+PRICE_SCALE = 1000
 
 class Category(models.Model):
     title = models.CharField(max_length=64)
     slug = models.SlugField(unique=True)
     image = models.ImageField(upload_to='category_images')
     description = models.TextField(blank=True)
+    parent = models.ForeignKey('self', on_delete=models.CASCADE, related_name='children', null=True, blank=True)
 
     class Meta:
         ordering = ['title']
@@ -22,7 +25,12 @@ class Category(models.Model):
         return self.title
 
     def get_absolute_url(self):
-        return reverse('category-detail', args=[self.slug])
+        return reverse('products:category-detail', args=[self.slug])
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            set_slug(self, self.title)
+        super().save(*args, **kwargs)
 
 class Product(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='products')
@@ -32,6 +40,7 @@ class Product(models.Model):
     price = models.PositiveIntegerField()
     category = models.ManyToManyField(Category, related_name='category_products')
     is_available = models.BooleanField(default=True)
+    stock = models.PositiveIntegerField()
 
     STATUS_CHOICES = (
         ('P', 'Published'),
@@ -56,53 +65,107 @@ class Product(models.Model):
             return main_image.image.url
         return None
 
-    def get_all_images(self):
-        return self.images.all()
-
-    @property
-    def total_stock(self):
-        total_stock = sum(variant.stock for variant in self.variants.all())
-        if total_stock > 0:
-            return total_stock
-        else:
-            return 'unavailable'
+    def sync_stock(self):
+        if self.variants.exists():
+            self.stock = self.variants.aggregate(total=models.Sum('stock'))['total'] or 0
+            self.save(update_fields=['stock'])
 
     def save(self, *args, **kwargs):
-        super().save(*args, **kwargs)
         if not self.slug:
-            self.slug = slugify(self.title)
-            self.save()
+            set_slug(self, self.title)
+        super().save(*args, **kwargs)
 
-class ProductImages(models.Model):
+class ProductOption(models.Model):
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='options')
+    option = models.CharField(max_length=32)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['product', 'option'],
+                name='unique_product_option'
+            )
+        ]
+    
+class OptionValue(models.Model):
+    option = models.ForeignKey(ProductOption, on_delete=models.CASCADE, related_name='values')
+    value = models.CharField(max_length=32)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['value', 'option'],
+                name='unique_option_value'
+            )
+        ]
+
+class ProductImage(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='images')
     image = models.ImageField(upload_to='product_images')
-    alt_text = models.CharField(max_length=64, blank=True, null=True)
+    alt_text = models.CharField(max_length=64, blank=True)
     is_main = models.BooleanField(default=False)
 
     class Meta:
         verbose_name = 'Product Image'
         verbose_name_plural = 'Product Images'
-        unique_together = ('product', 'image')
-        
+
+        constraints = [
+            models.UniqueConstraint(
+                fields=['product'],
+                condition=models.Q(is_main=True),
+                name='unique_main_image',
+            )
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.is_main:
+            with transaction.atomic():
+                ProductImage.objects.filter(product=self.product, is_main=True).exclude(pk=self.pk).update(is_main=False)
+                super().save(*args, **kwargs)
+            return
+        super().save(*args, **kwargs)
         
 class ProductVariant(models.Model):
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='variants')
-    name = models.CharField(max_length=64, blank=True)
-    value = models.CharField(max_length=64, blank=True)
-    price_modifier = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    price_modifier = models.IntegerField()
     stock = models.PositiveIntegerField(default=0)
 
     class Meta:
-        unique_together = ('product', 'name', 'value')
-        ordering = ['name', 'value']
+        ordering = ['product', 'price_modifier']
         verbose_name = 'Product Variant'
         verbose_name_plural = 'Product Variants'
 
     def __str__(self):
-        return f'{self.product} {self.name}: {self.value}'
+        return f"{self.product}'s variant"
 
     def get_final_price(self):
         return self.product.price + self.price_modifier
 
     def get_stock_display(self):
         return self.stock if self.stock > 0 else 'unavailable'
+
+class VariantOption(models.Model):
+    variant = models.ForeignKey(ProductVariant, on_delete=models.CASCADE, related_name='options')
+    option = models.ForeignKey(ProductOption, on_delete=models.CASCADE, related_name='variant_options')
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['variant', 'option'],
+                name='unique_variant_option',
+            )
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.variant.product != self.option.product:
+            raise ValueError('invalid option')
+        super().save(*args, **kwargs)
+
+class VariantOptionValue(models.Model):
+    variant_option = models.OneToOneField(VariantOption, on_delete=models.CASCADE, related_name='value')
+    value = models.ForeignKey(OptionValue, on_delete=models.CASCADE, related_name='variant_values')
+
+    def save(self, *args, **kwargs):
+        if self.variant_option.option != self.value.option:
+            raise ValueError('invalid value')
+        super().save(*args, **kwargs)

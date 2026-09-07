@@ -90,16 +90,13 @@ class AddVariantView(LoginRequiredMixin, FormView):
         return reverse_lazy('products:detail', kwargs={'slug': self.product.slug})
 
     def dispatch(self, request, *args, **kwargs):
-        self.product = get_object_or_404(Product, slug=self.kwargs.get('slug'))
+        self.product = get_object_or_404(Product, slug=kwargs.get('slug'), user=request.user)
         return super().dispatch(request, *args, **kwargs)
 
-    def get_form_kwargs(self):
-        kwargs = super().get_form_kwargs()
-        kwargs['product'] = self.product
-        return kwargs
-
     def form_valid(self, form):
-        form.save()
+        variant = form.save()
+        variant.product = self.product
+        variant.save()
         messages.success(self.request, 'variant added')
         return super().form_valid(form)
 
@@ -113,15 +110,10 @@ class VariantUpdateView(LoginRequiredMixin, UpdateView):
         return super().dispatch(request, *args, **kwargs)
 
     def get_success_url(self):
-        return reverse_lazy('products:detail', kwargs={'slug': self.kwargs.get('slug')})
+        return reverse_lazy('products:detail', kwargs={'slug': self.product.slug})
 
     def get_object(self, queryset=None):
         return get_object_or_404(ProductVariant, product=self.product, pk=self.kwargs.get('id'))
-
-    def get_form_kwargs(self):
-        kwargs = super().get_form_kwargs()
-        kwargs['product'] = self.product
-        return kwargs
 
 class VariantDeleteView(LoginRequiredMixin, DeleteView):
     model = ProductVariant

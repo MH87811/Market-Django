@@ -21,18 +21,7 @@ class MultipleFileField(forms.FileField):
 class ProductVariantForm(forms.ModelForm):
     class Meta:
         model = ProductVariant
-        fields = ('name', 'value', 'price_modifier', 'stock')
-
-    # def __init__(self, *args, **kwargs):
-    #     self.product = kwargs.pop('product', None)
-    #     super().__init__(*args, **kwargs)
-    #
-    # def save(self, commit=True):
-    #     variant = super().save(commit=False)
-    #     variant.product = self.product
-    #     if commit:
-    #         variant.save()
-    #     return variant
+        fields = ('price_modifier', 'stock')
 
 ProductVariantFormset = forms.inlineformset_factory(
     Product,
